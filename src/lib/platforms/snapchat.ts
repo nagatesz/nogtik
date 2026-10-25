@@ -1,11 +1,17 @@
 /**
  * Snapchat video extractor — fetches Spotlight/Stories at highest resolution.
  *
- * Strategy:
- * 1. Scrape the Snapchat page for video URL in og:video or embedded JSON
- * 2. Use Snapchat's story API endpoints
- * 3. Snapchat videos don't have watermarks on the video itself,
- *    so no watermark removal needed — just get the clean source
+ * Key discovery: Snapchat's Spotlight pages are Next.js apps with __NEXT_DATA__
+ * containing all video URLs from their CDN (bolt-gcdn.sc-cdn.net and cf-st.sc-cdn.net).
+ *
+ * URL pattern analysis:
+ * - `.27.IRZXSOY` suffix = SpotlightSharing quality (video, best for download)
+ * - `.256.IRZXSOY` suffix = DfLargeThumbnail (thumbnail image)
+ * - `cf-st.sc-cdn.net/d/` = primary CDN
+ * - `bolt-gcdn.sc-cdn.net` = backup CDN
+ * - `cf-st.sc-cdn.net/a/` = alternate video path
+ *
+ * Snapchat videos don't have watermarks, so we just need the clean source.
  */
 
 import type { VideoInfo } from "./tiktok";
@@ -13,18 +19,203 @@ import type { VideoInfo } from "./tiktok";
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+const MOBILE_UA =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+
+interface SnapVideo {
+  videoUrl: string;
+  thumbnailUrl: string;
+}
+
 /**
- * Strategy 1: Scrape the Snapchat page for og:video meta tag
- * Snapchat Spotlight and Stories pages embed video URLs in meta tags
+ * Parse Snapchat's __NEXT_DATA__ to extract video and thumbnail URLs.
+ *
+ * Videos use the SpotlightSharing quality suffix (.27.)
+ * Thumbnails use DfLargeThumbnail suffix (.256.)
+ *
+ * For the first/primary snap, we want the first .27. URL with the
+ * cf-st or bolt-gcdn CDN prefix.
  */
-async function fetchViaPageScrape(url: string): Promise<VideoInfo | null> {
+function extractVideosFromNextData(html: string): SnapVideo[] {
+  const nextDataMatch = html.match(
+    /<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/
+  );
+  if (!nextDataMatch) return [];
+
+  let pageProps: Record<string, unknown>;
   try {
-    const resp = await fetch(url, {
+    const data = JSON.parse(nextDataMatch[1]);
+    pageProps = data?.props?.pageProps;
+    if (!pageProps) return [];
+  } catch {
+    return [];
+  }
+
+  // Serialize the entire pageProps to find all CDN URLs
+  const jsonStr = JSON.stringify(pageProps);
+
+  // Find all video URLs (SpotlightSharing quality, .27. suffix)
+  const videoPattern =
+    /https?:\/\/(?:cf-st\.sc-cdn\.net\/[ad]|bolt-gcdn\.sc-cdn\.net\/[a-z0-9]+)\/[A-Za-z0-9_-]+\.27\.[A-Za-z0-9]+\?[^"\\]*/g;
+  const videoUrls = [
+    ...new Set(
+      (jsonStr.match(videoPattern) || []).map((u) =>
+        u.replace(/\\u0026/g, "&").replace(/&amp;/g, "&")
+      )
+    ),
+  ];
+
+  // Find all thumbnail URLs (.256. suffix)
+  const thumbPattern =
+    /https?:\/\/(?:cf-st\.sc-cdn\.net\/[ad]|bolt-gcdn\.sc-cdn\.net\/[a-z0-9]+)\/[A-Za-z0-9_-]+\.256\.[A-Za-z0-9]+\?[^"\\]*/g;
+  const thumbUrls = [
+    ...new Set(
+      (jsonStr.match(thumbPattern) || []).map((u) =>
+        u.replace(/\\u0026/g, "&").replace(/&amp;/g, "&")
+      )
+    ),
+  ];
+
+  if (videoUrls.length === 0) return [];
+
+  // Group videos: each unique base ID (before .27.) is one snap
+  const grouped = new Map<string, SnapVideo>();
+
+  for (const vUrl of videoUrls) {
+    const idMatch = vUrl.match(/\/([A-Za-z0-9_-]+)\.27\./);
+    if (!idMatch) continue;
+    const baseId = idMatch[1];
+
+    if (grouped.has(baseId)) continue;
+
+    // Find matching thumbnail
+    const thumb = thumbUrls.find((t) => t.includes(baseId)) || "";
+
+    grouped.set(baseId, {
+      videoUrl: vUrl,
+      thumbnailUrl: thumb,
+    });
+  }
+
+  return [...grouped.values()];
+}
+
+/**
+ * Also look for direct video URLs in the page HTML (og:video, source tags, etc.)
+ */
+function extractVideoFromMeta(html: string): string | null {
+  const patterns = [
+    /property="og:video(?::secure_url)?"\s+content="([^"]+)"/,
+    /<source\s+[^>]*src="([^"]+)"[^>]*type="video\/mp4"/,
+    /"video_url"\s*:\s*"([^"]+)"/,
+    /"media_url"\s*:\s*"([^"]+\.mp4[^"]*)"/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match) {
+      return match[1]
+        .replace(/\\u0026/g, "&")
+        .replace(/&amp;/g, "&")
+        .replace(/\\\//g, "/");
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Strategy 1: Fetch the Snapchat page and parse __NEXT_DATA__ for CDN URLs
+ * This is the most reliable approach for Spotlight content
+ */
+async function fetchViaPageData(url: string): Promise<VideoInfo | null> {
+  try {
+    // Try desktop UA first, then mobile
+    for (const ua of [USER_AGENT, MOBILE_UA]) {
+      const resp = await fetch(url, {
+        headers: {
+          "User-Agent": ua,
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+        redirect: "follow",
+      });
+
+      // Even 404 pages from Snapchat contain __NEXT_DATA__ with spotlight feed
+      const html = await resp.text();
+
+      // Try __NEXT_DATA__ extraction first
+      const videos = extractVideosFromNextData(html);
+      if (videos.length > 0) {
+        // Get the first video (primary snap)
+        const primary = videos[0];
+
+        // Try to get metadata from og tags
+        const titleMatch = html.match(
+          /property="og:title"\s+content="([^"]+)"/
+        );
+        const descMatch = html.match(
+          /property="og:description"\s+content="([^"]+)"/
+        );
+
+        return {
+          platform: "snapchat",
+          videoUrl: primary.videoUrl,
+          thumbnailUrl: primary.thumbnailUrl,
+          title: titleMatch?.[1] || descMatch?.[1] || "Snapchat Video",
+          author: "",
+          needsProxy: true,
+          headers: {
+            "User-Agent": USER_AGENT,
+            Referer: "https://www.snapchat.com/",
+          },
+        };
+      }
+
+      // Fallback: try og:video meta tag
+      const metaVideo = extractVideoFromMeta(html);
+      if (metaVideo) {
+        const titleMatch = html.match(
+          /property="og:title"\s+content="([^"]+)"/
+        );
+        const thumbMatch = html.match(
+          /property="og:image"\s+content="([^"]+)"/
+        );
+
+        return {
+          platform: "snapchat",
+          videoUrl: metaVideo,
+          thumbnailUrl: thumbMatch?.[1] || "",
+          title: titleMatch?.[1] || "Snapchat Video",
+          author: "",
+          needsProxy: true,
+          headers: {
+            "User-Agent": USER_AGENT,
+            Referer: "https://www.snapchat.com/",
+          },
+        };
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Strategy 2: Try fetching the page with /embed suffix
+ * Some Snapchat story URLs support embedded views
+ */
+async function fetchViaEmbed(url: string): Promise<VideoInfo | null> {
+  try {
+    // Try adding /embed to the URL
+    const embedUrl = url.replace(/\/?$/, "/embed");
+    const resp = await fetch(embedUrl, {
       headers: {
         "User-Agent": USER_AGENT,
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
+        Accept: "text/html",
       },
       redirect: "follow",
     });
@@ -32,53 +223,14 @@ async function fetchViaPageScrape(url: string): Promise<VideoInfo | null> {
     if (!resp.ok) return null;
     const html = await resp.text();
 
-    // Look for og:video or video source
-    const patterns = [
-      /property="og:video"\s+content="([^"]+)"/,
-      /property="og:video:secure_url"\s+content="([^"]+)"/,
-      /<source\s+src="([^"]+)"\s+type="video\/mp4"/,
-      /"video_url"\s*:\s*"([^"]+)"/,
-      /"media_url"\s*:\s*"([^"]+)"/,
-      /"url"\s*:\s*"(https:\/\/[^"]*(?:cf-st\.sc|snapchat)[^"]*\.mp4[^"]*)"/,
-    ];
-
-    let videoUrl: string | null = null;
-    for (const pattern of patterns) {
-      const match = html.match(pattern);
-      if (match) {
-        videoUrl = match[1]
-          .replace(/&amp;/g, "&")
-          .replace(/\\u0026/g, "&")
-          .replace(/\\\//g, "/");
-        break;
-      }
-    }
-
-    if (!videoUrl) {
-      // Try looking for Snapchat's bolt CDN URLs
-      const boltMatch = html.match(
-        /(https:\/\/bolt-gcdn\.sc-cdn\.net\/[^"'\s]+)/
-      );
-      if (boltMatch) {
-        videoUrl = boltMatch[1];
-      }
-    }
-
-    if (!videoUrl) return null;
-
-    // Extract metadata
-    const thumbMatch = html.match(
-      /property="og:image"\s+content="([^"]+)"/
-    );
-    const titleMatch = html.match(
-      /property="og:title"\s+content="([^"]+)"/
-    );
+    const metaVideo = extractVideoFromMeta(html);
+    if (!metaVideo) return null;
 
     return {
       platform: "snapchat",
-      videoUrl,
-      thumbnailUrl: thumbMatch?.[1] || "",
-      title: titleMatch?.[1] || "Snapchat Video",
+      videoUrl: metaVideo,
+      thumbnailUrl: "",
+      title: "Snapchat Video",
       author: "",
       needsProxy: true,
       headers: {
@@ -92,98 +244,48 @@ async function fetchViaPageScrape(url: string): Promise<VideoInfo | null> {
 }
 
 /**
- * Strategy 2: Use Snapchat's story API for Spotlight content
+ * Strategy 3: Use SnapSave.app for Snapchat videos
  */
-async function fetchViaSpotlightApi(url: string): Promise<VideoInfo | null> {
+async function fetchViaSnapSave(url: string): Promise<VideoInfo | null> {
   try {
-    // Extract the snap ID from the URL
-    const idMatch = url.match(
-      /\/(?:spotlight|story|s)\/([A-Za-z0-9_-]+)/
-    );
-    if (!idMatch) return null;
+    const formData = new URLSearchParams();
+    formData.append("url", url);
 
-    const snapId = idMatch[1];
-
-    // Try the Snapchat web API
-    const apiUrl = `https://www.snapchat.com/web/deeplink/snapcode?data=${snapId}&type=spotlight`;
-    const resp = await fetch(apiUrl, {
+    const resp = await fetch("https://snapsave.app/action.php?lang=en", {
+      method: "POST",
       headers: {
         "User-Agent": USER_AGENT,
-        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        Origin: "https://snapsave.app",
+        Referer: "https://snapsave.app/",
       },
+      body: formData.toString(),
     });
 
     if (!resp.ok) return null;
-    const data = await resp.json();
+    const text = await resp.text();
 
-    const videoUrl = data?.media?.mediaUrl || data?.snapUrl;
-    if (!videoUrl) return null;
-
-    return {
-      platform: "snapchat",
-      videoUrl,
-      thumbnailUrl: data?.media?.thumbnailUrl || "",
-      title: data?.title || "Snapchat Video",
-      author: data?.username || "",
-      needsProxy: true,
-      headers: {
-        "User-Agent": USER_AGENT,
-        Referer: "https://www.snapchat.com/",
-      },
-    };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Strategy 3: Use Snapchat's public stories web endpoint
- */
-async function fetchViaStoriesWeb(url: string): Promise<VideoInfo | null> {
-  try {
-    // For story URLs like snapchat.com/add/username or stories
-    const resp = await fetch(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      },
-      redirect: "follow",
-    });
-
-    if (!resp.ok) return null;
-    const html = await resp.text();
-
-    // Look for Snapchat's __NEXT_DATA__ or embedded snap data
-    const nextDataMatch = html.match(
-      /<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/
+    // Look for CDN URLs in the response
+    const cdnUrls = text.match(
+      /https?:\/\/[^\s"'\\]+(?:sc-cdn\.net|snapchat)[^\s"'\\]*\.mp4[^\s"'\\]*/g
     );
-    if (!nextDataMatch) return null;
 
-    const nextData = JSON.parse(nextDataMatch[1]);
-    const props = nextData?.props?.pageProps;
+    // Also look for general video URLs
+    const videoUrls = text.match(
+      /https?:\/\/[^\s"'\\]+\.mp4[^\s"'\\]*/g
+    );
 
-    // Navigate through the data structure to find video URL
-    const story =
-      props?.story ||
-      props?.snap ||
-      props?.spotlight;
-    if (!story) return null;
-
-    const videoUrl =
-      story.snapMediaUrl ||
-      story.mediaUrl ||
-      story.video?.url;
-
-    if (!videoUrl) return null;
+    const url_list = cdnUrls || videoUrls;
+    if (!url_list || url_list.length === 0) return null;
 
     return {
       platform: "snapchat",
-      videoUrl,
-      thumbnailUrl: story.thumbnailUrl || story.snapThumbnailUrl || "",
-      title: story.title || "Snapchat Video",
-      author: story.username || "",
+      videoUrl: url_list[0]
+        .replace(/\\u0026/g, "&")
+        .replace(/&amp;/g, "&"),
+      thumbnailUrl: "",
+      title: "Snapchat Video",
+      author: "",
       needsProxy: true,
       headers: {
         "User-Agent": USER_AGENT,
@@ -199,19 +301,21 @@ async function fetchViaStoriesWeb(url: string): Promise<VideoInfo | null> {
  * Main Snapchat extraction function — tries multiple strategies
  */
 export async function extractSnapchat(inputUrl: string): Promise<VideoInfo> {
-  // Strategy 1: Page scraping (most reliable)
-  const scrapeResult = await fetchViaPageScrape(inputUrl);
-  if (scrapeResult) return scrapeResult;
+  // Strategy 1: Page data parsing (__NEXT_DATA__ + og:video)
+  // This is the most reliable since Snapchat's Spotlight pages include
+  // all video CDN URLs in the server-rendered data
+  const pageResult = await fetchViaPageData(inputUrl);
+  if (pageResult) return pageResult;
 
-  // Strategy 2: Spotlight API
-  const spotlightResult = await fetchViaSpotlightApi(inputUrl);
-  if (spotlightResult) return spotlightResult;
+  // Strategy 2: Embed page
+  const embedResult = await fetchViaEmbed(inputUrl);
+  if (embedResult) return embedResult;
 
-  // Strategy 3: Stories web data
-  const storiesResult = await fetchViaStoriesWeb(inputUrl);
-  if (storiesResult) return storiesResult;
+  // Strategy 3: SnapSave third-party
+  const snapSaveResult = await fetchViaSnapSave(inputUrl);
+  if (snapSaveResult) return snapSaveResult;
 
   throw new Error(
-    "Could not extract Snapchat video. The snap may have expired, be private, or the link may be invalid."
+    "Could not extract Snapchat video. The snap may have expired, be private, or the link format isn't supported."
   );
 }

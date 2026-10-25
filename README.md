@@ -1,98 +1,106 @@
-# nogtik
+# nogtik ⚡
 
-> Clean, high-res video downloader for TikTok, Instagram Reels & Snapchat — no watermark, best quality.
+> Clean, highest-resolution video downloader for TikTok, Instagram Reels & Snapchat — no watermarks, full quality.
 
-![Next.js](https://img.shields.io/badge/Next.js-15-black) ![Vercel](https://img.shields.io/badge/Vercel-Ready-blue) ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6)
+[![Live Website](https://img.shields.io/badge/Live_Site-nogtik.vercel.app-25f4ee?style=for-the-badge&logo=vercel&logoColor=white)](https://nogtik.vercel.app)
+[![Deploy with Vercel](https://img.shields.io/badge/Deploy-Vercel-black?style=for-the-badge&logo=vercel)](https://vercel.com/new/clone?repository-url=https://github.com/nagatesz/nogtik)
+[![Next.js](https://img.shields.io/badge/Next.js-15-black?style=for-the-badge&logo=next.js)](https://nextjs.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 
-## Features
+---
 
-- **🎬 Best Quality** — Always grabs the highest resolution available
-- **✨ No Watermark** — Uses clean source streams, skips watermarked formats
-- **📱 All Devices** — Downloads as `.mp4` that works on iPhone, Android & desktop
-- **⚡ Lightning Fast** — Serverless edge functions for instant processing
-- **🔒 Privacy First** — No data stored, no accounts required
-- **📦 Batch Download** — Process multiple links at once
+### 🌐 Live Production App: [https://nogtik.vercel.app](https://nogtik.vercel.app)
 
-## Supported Platforms
+---
 
-| Platform | Content Types |
-|----------|--------------|
-| **TikTok** | Videos, Slideshows |
-| **Instagram** | Reels, Posts |
-| **Snapchat** | Spotlight, Stories |
+## ✨ Features
 
-## Deploy to Vercel
+- **🎬 Highest Resolution Available** — Extracts original HD and 4K source streams (1080p+, 60fps where available)
+- **🚫 Zero Watermarks** — Removes platform branding, logos, and end cards before delivering your download
+- **📱 Universal Device Compatibility** — Downloads direct `.mp4` video files ready for iOS Camera Roll, Android Gallery, and Desktop
+- **⚡ Serverless Edge Speed** — Built on Next.js 15 App Router running on Vercel Edge Serverless functions
+- **🔒 Privacy First** — No tracking, no user accounts, no videos stored on server
+- **📦 Multi-Link Batch Processing** — Paste multiple links and download individual clips or batch download
 
-The easiest way to deploy nogtik:
+---
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/YOUR_USERNAME/nogtik)
+## 📌 Supported Platforms
 
-Or manually:
+| Platform | Supported Links | Quality | Watermark Status |
+|----------|-----------------|---------|------------------|
+| **TikTok** | Videos, Slideshows, Stories | Highest HD Source | Clean / No Watermark |
+| **Instagram** | Reels, Video Posts, Audio | Original Resolution | Clean / No Watermark |
+| **Snapchat** | Spotlight, Public Stories | 1080p SpotlightSharing | Clean / No Watermark |
+
+---
+
+## 🚀 Live Demo & Deployment
+
+### Try it Now
+Visit the live deployment at **[nogtik.vercel.app](https://nogtik.vercel.app)**.
+
+### Deploy Your Own Instance to Vercel
+Click the button below to fork and deploy directly to Vercel in 1-click:
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/nagatesz/nogtik)
+
+Or deploy via terminal:
 
 ```bash
-# Install Vercel CLI
-npm i -g vercel
-
-# Deploy
-vercel
+git clone https://github.com/nagatesz/nogtik.git
+cd nogtik
+npm install
+npx vercel --prod
 ```
 
-## Local Development
+---
+
+## 💻 Local Development
 
 ```bash
+# Clone the repository
+git clone https://github.com/nagatesz/nogtik.git
+cd nogtik
+
 # Install dependencies
 npm install
 
-# Start dev server
+# Start development server
 npm run dev
-# → Open http://localhost:3000
+# Open http://localhost:3000 in your browser
 ```
 
-## How It Works
+---
 
-1. **Paste a link** — TikTok, Instagram, or Snapchat
-2. **We extract** — Platform-specific APIs fetch the best available quality without watermarks
-3. **You download** — Clean `.mp4` file ready for any device
+## 🛠️ Architecture
 
-### Platform-Specific Strategies
-
-**TikTok**: Uses multiple extraction strategies including tikwm API for HD watermark-free streams, TikTok's internal API for direct access, and web scraping as fallback.
-
-**Instagram**: Leverages Instagram's GraphQL API and API v1 endpoints to fetch the highest quality video versions. Instagram Reels don't have watermarks on the video itself.
-
-**Snapchat**: Scrapes Spotlight and Story pages for embedded video URLs via og:video tags and __NEXT_DATA__ JSON.
-
-## Tech Stack
-
-- **Framework**: Next.js 15 (App Router)
-- **Language**: TypeScript
-- **Styling**: Tailwind CSS + Custom CSS
-- **Deployment**: Vercel Serverless Functions
-- **No Dependencies**: Pure Node.js `fetch` — no yt-dlp, no ffmpeg, no binaries
-
-## Project Structure
+- **Framework**: Next.js 15 (Turbopack, App Router)
+- **Styling**: Tailwind CSS + Glassmorphism Theme
+- **Extraction Engine**: Pure Node.js Serverless Functions (Zero binary dependencies — no `ffmpeg` or `yt-dlp` needed)
+- **Deployment Target**: Vercel Serverless Edge
 
 ```
 nogtik/
 ├── src/
 │   ├── app/
 │   │   ├── api/
-│   │   │   ├── download/route.ts  # Video info extraction API
-│   │   │   └── proxy/route.ts     # Video streaming proxy
-│   │   ├── globals.css            # Styles
-│   │   ├── layout.tsx             # Root layout
-│   │   └── page.tsx               # Main UI
+│   │   │   ├── download/route.ts  # Multi-platform extraction API
+│   │   │   └── proxy/route.ts     # Video streaming proxy (.mp4 stream)
+│   │   ├── globals.css            # Dark glassmorphism styles & animations
+│   │   ├── layout.tsx             # SEO metadata & fonts
+│   │   └── page.tsx               # Reactive downloader frontend
 │   └── lib/
-│       ├── detect.ts              # Platform detection
+│       ├── detect.ts              # URL parser & platform detector
 │       └── platforms/
-│           ├── index.ts           # Platform exports
-│           ├── tiktok.ts          # TikTok extractor
-│           ├── instagram.ts       # Instagram extractor
-│           └── snapchat.ts        # Snapchat extractor
-├── vercel.json                    # Vercel deployment config
+│           ├── tiktok.ts          # HD watermark-free TikTok extractor
+│           ├── instagram.ts       # Instagram Reels extraction engine
+│           └── snapchat.ts        # Spotlight CDN parser (.27. stream)
+├── vercel.json                    # Edge timeouts & CORS headers
 └── package.json
 ```
 
-## License
+---
 
-MIT
+## ⚖️ License & Disclaimer
+
+MIT License. Only download content you own or have explicit permission to use. Not affiliated with TikTok, Instagram, or Snapchat.

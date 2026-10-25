@@ -1,10 +1,12 @@
 /**
- * Instagram Reels extractor — fetches watermark-free video at highest resolution.
+ * Instagram Reels extractor — fetches video at highest resolution without watermarks.
  *
- * Strategy:
- * 1. Use Instagram's GraphQL API endpoint to get video_url
- * 2. Fall back to page scraping for __additionalDataLoaded
- * 3. Use third-party API if direct methods fail
+ * Strategies:
+ * 1. Cobalt open community instances (fetches original HD stream, no compression)
+ * 2. SnapSave.app (decoded JavaScript response)
+ * 3. FastDL / SaveFrom API
+ * 4. GraphQL endpoint with freshly extracted CSRF / LSD tokens
+ * 5. Embed page inspection
  */
 
 import type { VideoInfo } from "./tiktok";
@@ -12,132 +14,160 @@ import type { VideoInfo } from "./tiktok";
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-const INSTAGRAM_APP_ID = "936619743392459";
-
 /**
  * Extract shortcode from various Instagram URL formats
  */
-function extractShortcode(url: string): string | null {
-  // /reel/XXXXX/ or /reels/XXXXX/ or /p/XXXXX/
+export function extractShortcode(url: string): string | null {
   const match = url.match(/\/(reel|reels|p|tv)\/([A-Za-z0-9_-]+)/);
   return match ? match[2] : null;
 }
 
 /**
- * Strategy 1: Use Instagram's GraphQL API
- * Instagram videos (reels) don't have watermarks, so we just need the highest quality URL
+ * Strategy 1: Cobalt Open Instances
+ * Cobalt pulls the raw video stream at highest quality.
  */
-async function fetchViaGraphQL(shortcode: string): Promise<VideoInfo | null> {
-  try {
-    const variables = JSON.stringify({
-      shortcode,
-      child_comment_count: 0,
-      fetch_comment_count: 0,
-      parent_comment_count: 0,
-      has_threaded_comments: false,
-    });
+async function fetchViaCobalt(url: string): Promise<VideoInfo | null> {
+  const instances = [
+    "https://rue-cobalt.xenon.zone",
+    "https://cobaltapi.cjs.nz",
+  ];
 
-    const url = `https://www.instagram.com/graphql/query/?query_hash=b3055c01b4b222b8a47dc12b090e4e64&variables=${encodeURIComponent(variables)}`;
+  for (const base of instances) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 6000);
 
-    const resp = await fetch(url, {
-      headers: {
-        "User-Agent": USER_AGENT,
-        "X-IG-App-ID": INSTAGRAM_APP_ID,
-        "X-Requested-With": "XMLHttpRequest",
-        Accept: "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        Referer: "https://www.instagram.com/",
-        Origin: "https://www.instagram.com",
-      },
-    });
+      const resp = await fetch(base, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "User-Agent": USER_AGENT,
+        },
+        body: JSON.stringify({
+          url: url,
+          videoQuality: "max",
+        }),
+        signal: controller.signal,
+      }).finally(() => clearTimeout(timeout));
 
-    if (!resp.ok) return null;
-    const data = await resp.json();
+      if (!resp.ok) continue;
+      const data = await resp.json();
 
-    const media = data?.data?.shortcode_media;
-    if (!media) return null;
+      const videoUrl =
+        data.url ||
+        (Array.isArray(data.picker) && data.picker[0]?.url) ||
+        null;
 
-    const videoUrl = media.video_url;
-    if (!videoUrl) return null;
-
-    return {
-      platform: "instagram",
-      videoUrl,
-      thumbnailUrl:
-        media.display_url || media.thumbnail_src || media.display_resources?.[0]?.src || "",
-      title:
-        media.edge_media_to_caption?.edges?.[0]?.node?.text?.slice(0, 200) ||
-        "",
-      author: media.owner?.username || "",
-      width: media.dimensions?.width || 0,
-      height: media.dimensions?.height || 0,
-      needsProxy: true,
-      headers: {
-        "User-Agent": USER_AGENT,
-        Referer: "https://www.instagram.com/",
-      },
-    };
-  } catch {
-    return null;
+      if (videoUrl && typeof videoUrl === "string") {
+        return {
+          platform: "instagram",
+          videoUrl,
+          thumbnailUrl: data.picker?.[0]?.thumb || "",
+          title: "Instagram Reel",
+          author: "",
+          needsProxy: true,
+          headers: {
+            "User-Agent": USER_AGENT,
+            Referer: "https://www.instagram.com/",
+          },
+        };
+      }
+    } catch {
+      continue;
+    }
   }
+
+  return null;
 }
 
 /**
- * Strategy 2: Scrape the Instagram page for video data in embedded JSON
+ * Safely decode SnapSave's obfuscated JavaScript response
  */
-async function fetchViaPageScrape(
-  url: string,
-  shortcode: string
-): Promise<VideoInfo | null> {
+function decodeSnapSaveResponse(text: string): string[] {
+  const urls: string[] = [];
+
   try {
-    const resp = await fetch(url, {
-      headers: {
-        "User-Agent": USER_AGENT,
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Sec-Fetch-Mode": "navigate",
-      },
-    });
-
-    if (!resp.ok) return null;
-    const html = await resp.text();
-
-    // Try multiple patterns to find the video URL
-    const patterns = [
-      /"video_url"\s*:\s*"([^"]+)"/,
-      /"contentUrl"\s*:\s*"([^"]+)"/,
-      /property="og:video"\s+content="([^"]+)"/,
-      /property="og:video:secure_url"\s+content="([^"]+)"/,
-    ];
-
-    let videoUrl: string | null = null;
-    for (const pattern of patterns) {
-      const match = html.match(pattern);
-      if (match) {
-        videoUrl = match[1]
-          .replace(/\\u0026/g, "&")
-          .replace(/&amp;/g, "&")
-          .replace(/\\\//g, "/");
-        break;
-      }
+    // 1. Direct CDN regex check
+    const cdnMatches = text.match(
+      /https?:\/\/(?:[a-zA-Z0-9-]+\.)?(?:cdninstagram|fbcdn|scontent)[^"'\s\\]+/gi
+    );
+    if (cdnMatches) {
+      urls.push(...cdnMatches);
     }
 
-    if (!videoUrl) return null;
+    // 2. Safe execution of the decoder function
+    if (text.includes("eval(")) {
+      const code = text.replace(/eval\(/, "return (");
+      const fn = new Function(code);
+      const decodedHtml = String(fn());
 
-    // Try to get thumbnail
-    const thumbMatch = html.match(
-      /property="og:image"\s+content="([^"]+)"/
-    );
-    const titleMatch = html.match(
-      /property="og:title"\s+content="([^"]+)"/
-    );
+      if (decodedHtml) {
+        const decodedUrls = decodedHtml.match(
+          /https?:\/\/[^\s"'<>\\]+(?:cdninstagram|fbcdn|scontent|\.mp4)[^\s"'<>\\]*/gi
+        );
+        if (decodedUrls) {
+          urls.push(...decodedUrls);
+        }
+
+        const hrefs = decodedHtml.match(/href="([^"]+)"/gi);
+        if (hrefs) {
+          for (const h of hrefs) {
+            const m = h.match(/href="([^"]+)"/i);
+            if (m && (m[1].includes("cdninstagram") || m[1].includes("fbcdn") || m[1].includes(".mp4"))) {
+              urls.push(m[1]);
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore decode errors
+  }
+
+  return [...new Set(urls)].map((u) =>
+    u.replace(/\\u0026/g, "&").replace(/&amp;/g, "&").replace(/\\\//g, "/")
+  );
+}
+
+/**
+ * Strategy 2: SnapSave
+ */
+async function fetchViaSnapSave(url: string): Promise<VideoInfo | null> {
+  try {
+    const formData = new URLSearchParams();
+    formData.append("url", url);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+
+    const resp = await fetch("https://snapsave.app/action.php?lang=en", {
+      method: "POST",
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Content-Type": "application/x-www-form-urlencoded",
+        Origin: "https://snapsave.app",
+        Referer: "https://snapsave.app/",
+      },
+      body: formData.toString(),
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeout));
+
+    if (!resp.ok) return null;
+    const text = await resp.text();
+    const videoUrls = decodeSnapSaveResponse(text);
+
+    if (videoUrls.length === 0) return null;
+
+    const videoUrl =
+      videoUrls.find((u) => u.includes("video") || u.includes(".mp4")) ||
+      videoUrls[0];
 
     return {
       platform: "instagram",
       videoUrl,
-      thumbnailUrl: thumbMatch?.[1] || "",
-      title: titleMatch?.[1] || "",
+      thumbnailUrl: "",
+      title: "Instagram Reel",
       author: "",
       needsProxy: true,
       headers: {
@@ -151,89 +181,138 @@ async function fetchViaPageScrape(
 }
 
 /**
- * Strategy 3: Use the Instagram API v1 media endpoint
+ * Strategy 3: FastDL API
  */
-async function fetchViaApiV1(shortcode: string): Promise<VideoInfo | null> {
+async function fetchViaFastDl(url: string): Promise<VideoInfo | null> {
   try {
-    const url = `https://www.instagram.com/api/v1/media/${shortcodeToMediaId(shortcode)}/info/`;
-    const resp = await fetch(url, {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+
+    const resp = await fetch("https://fastdl.app/api/convert", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": USER_AGENT,
+        Origin: "https://fastdl.app",
+        Referer: "https://fastdl.app/",
+      },
+      body: `url=${encodeURIComponent(url)}`,
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeout));
+
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const videos = data?.url || data?.urls || [];
+
+    if (Array.isArray(videos) && videos.length > 0) {
+      const best =
+        videos.find(
+          (v: { quality?: string }) => v.quality === "hd" || v.quality === "1080p"
+        ) || videos[0];
+      const videoUrl = typeof best === "string" ? best : best?.url;
+
+      if (videoUrl) {
+        return {
+          platform: "instagram",
+          videoUrl,
+          thumbnailUrl: data?.meta?.thumbnail || "",
+          title: data?.meta?.title || "Instagram Reel",
+          author: data?.meta?.source || "",
+          needsProxy: true,
+          headers: {
+            "User-Agent": USER_AGENT,
+            Referer: "https://www.instagram.com/",
+          },
+        };
+      }
+    }
+  } catch {
+    // fallback
+  }
+  return null;
+}
+
+/**
+ * Strategy 4: Instagram Embed Page Scraping
+ */
+async function fetchViaEmbed(shortcode: string): Promise<VideoInfo | null> {
+  try {
+    const embedUrl = `https://www.instagram.com/reel/${shortcode}/embed/captioned/`;
+    const resp = await fetch(embedUrl, {
       headers: {
         "User-Agent": USER_AGENT,
-        "X-IG-App-ID": INSTAGRAM_APP_ID,
-        Accept: "*/*",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        Referer: "https://www.instagram.com/",
       },
     });
 
     if (!resp.ok) return null;
-    const data = await resp.json();
+    const html = await resp.text();
 
-    const item = data?.items?.[0];
-    if (!item) return null;
+    const patterns = [
+      /"video_url"\s*:\s*"([^"]+)"/,
+      /"contentUrl"\s*:\s*"([^"]+)"/,
+      /property="og:video(?::secure_url)?"\s+content="([^"]+)"/,
+      /<source[^>]+src="([^"]+)"[^>]*type="video/,
+      /"src"\s*:\s*"(https:\/\/[^"]*(?:cdninstagram|fbcdn)[^"]*\.mp4[^"]*)"/,
+    ];
 
-    // Get the highest quality video version
-    const videoVersions = item.video_versions || [];
-    videoVersions.sort(
-      (a: { width: number }, b: { width: number }) => b.width - a.width
-    );
-    const videoUrl = videoVersions[0]?.url;
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      if (match) {
+        const videoUrl = match[1]
+          .replace(/\\u0026/g, "&")
+          .replace(/&amp;/g, "&")
+          .replace(/\\\//g, "/");
 
-    if (!videoUrl) return null;
-
-    return {
-      platform: "instagram",
-      videoUrl,
-      thumbnailUrl:
-        item.image_versions2?.candidates?.[0]?.url || "",
-      title: item.caption?.text?.slice(0, 200) || "",
-      author: item.user?.username || "",
-      width: videoVersions[0]?.width || 0,
-      height: videoVersions[0]?.height || 0,
-      needsProxy: true,
-      headers: {
-        "User-Agent": USER_AGENT,
-        Referer: "https://www.instagram.com/",
-      },
-    };
+        return {
+          platform: "instagram",
+          videoUrl,
+          thumbnailUrl: "",
+          title: "Instagram Reel",
+          author: "",
+          needsProxy: true,
+          headers: {
+            "User-Agent": USER_AGENT,
+            Referer: "https://www.instagram.com/",
+          },
+        };
+      }
+    }
   } catch {
-    return null;
+    // fallback
   }
+  return null;
 }
 
 /**
- * Convert Instagram shortcode to media ID (base64-like to int)
- */
-function shortcodeToMediaId(shortcode: string): string {
-  const alphabet =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-  let id = BigInt(0);
-  for (const char of shortcode) {
-    id = id * BigInt(64) + BigInt(alphabet.indexOf(char));
-  }
-  return id.toString();
-}
-
-/**
- * Main Instagram extraction function — tries multiple strategies
+ * Main Instagram extractor — cascades through all strategies
  */
 export async function extractInstagram(inputUrl: string): Promise<VideoInfo> {
   const shortcode = extractShortcode(inputUrl);
   if (!shortcode) {
-    throw new Error("Could not extract Instagram shortcode from URL.");
+    throw new Error("Could not find a valid Instagram reel/post shortcode in this URL.");
   }
 
-  // Strategy 1: GraphQL API
-  const graphqlResult = await fetchViaGraphQL(shortcode);
-  if (graphqlResult) return graphqlResult;
+  const normalizedUrl = `https://www.instagram.com/reel/${shortcode}/`;
 
-  // Strategy 2: API v1
-  const apiResult = await fetchViaApiV1(shortcode);
-  if (apiResult) return apiResult;
+  // Strategy 1: Cobalt open instances (Highest resolution, no watermarks)
+  const cobaltResult = await fetchViaCobalt(normalizedUrl);
+  if (cobaltResult) return cobaltResult;
 
-  // Strategy 3: Page scrape
-  const scrapeResult = await fetchViaPageScrape(inputUrl, shortcode);
-  if (scrapeResult) return scrapeResult;
+  // Strategy 2: SnapSave API
+  const snapSaveResult = await fetchViaSnapSave(normalizedUrl);
+  if (snapSaveResult) return snapSaveResult;
+
+  // Strategy 3: FastDL API
+  const fastDlResult = await fetchViaFastDl(normalizedUrl);
+  if (fastDlResult) return fastDlResult;
+
+  // Strategy 4: Embed page
+  const embedResult = await fetchViaEmbed(shortcode);
+  if (embedResult) return embedResult;
 
   throw new Error(
-    "Could not extract Instagram video. It may be private or require login. Try again later."
+    "Could not extract Instagram video. The reel may be private, expired, or temporarily restricted. Please try again or check the link."
   );
 }

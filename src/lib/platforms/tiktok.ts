@@ -126,11 +126,14 @@ async function fetchViaTikTokWeb(url: string): Promise<VideoInfo | null> {
  */
 async function fetchViaTikwm(url: string): Promise<VideoInfo | null> {
   try {
-    const apiUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(url)}&hd=1`;
+    // Request HD quality explicitly
+    const apiUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(url)}&hd=1&count=12&cursor=0&web=1&is_b2c=1`;
     const resp = await fetch(apiUrl, {
+      method: "POST",
       headers: {
         "User-Agent": USER_AGENT,
         Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
       },
     });
 
@@ -140,7 +143,8 @@ async function fetchViaTikwm(url: string): Promise<VideoInfo | null> {
     if (data.code !== 0 || !data.data) return null;
 
     const videoData = data.data;
-    // Prefer HD play URL, then regular play, then download
+    // Prefer HD play URL (highest quality), then regular play, then download
+    // hdplay = watermark-free HD, play = watermark-free SD, wmplay = watermarked
     const videoUrl =
       videoData.hdplay || videoData.play || videoData.wmplay || null;
 

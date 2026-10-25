@@ -1,36 +1,98 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# nogtik
 
-## Getting Started
+> Clean, high-res video downloader for TikTok, Instagram Reels & Snapchat — no watermark, best quality.
 
-First, run the development server:
+![Next.js](https://img.shields.io/badge/Next.js-15-black) ![Vercel](https://img.shields.io/badge/Vercel-Ready-blue) ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6)
+
+## Features
+
+- **🎬 Best Quality** — Always grabs the highest resolution available
+- **✨ No Watermark** — Uses clean source streams, skips watermarked formats
+- **📱 All Devices** — Downloads as `.mp4` that works on iPhone, Android & desktop
+- **⚡ Lightning Fast** — Serverless edge functions for instant processing
+- **🔒 Privacy First** — No data stored, no accounts required
+- **📦 Batch Download** — Process multiple links at once
+
+## Supported Platforms
+
+| Platform | Content Types |
+|----------|--------------|
+| **TikTok** | Videos, Slideshows |
+| **Instagram** | Reels, Posts |
+| **Snapchat** | Spotlight, Stories |
+
+## Deploy to Vercel
+
+The easiest way to deploy nogtik:
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/YOUR_USERNAME/nogtik)
+
+Or manually:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+# Install Vercel CLI
+npm i -g vercel
+
+# Deploy
+vercel
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Local Development
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+# Install dependencies
+npm install
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+# Start dev server
+npm run dev
+# → Open http://localhost:3000
+```
 
-## Learn More
+## How It Works
 
-To learn more about Next.js, take a look at the following resources:
+1. **Paste a link** — TikTok, Instagram, or Snapchat
+2. **We extract** — Platform-specific APIs fetch the best available quality without watermarks
+3. **You download** — Clean `.mp4` file ready for any device
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### Platform-Specific Strategies
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+**TikTok**: Uses multiple extraction strategies including tikwm API for HD watermark-free streams, TikTok's internal API for direct access, and web scraping as fallback.
 
-## Deploy on Vercel
+**Instagram**: Leverages Instagram's GraphQL API and API v1 endpoints to fetch the highest quality video versions. Instagram Reels don't have watermarks on the video itself.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+**Snapchat**: Scrapes Spotlight and Story pages for embedded video URLs via og:video tags and __NEXT_DATA__ JSON.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Tech Stack
+
+- **Framework**: Next.js 15 (App Router)
+- **Language**: TypeScript
+- **Styling**: Tailwind CSS + Custom CSS
+- **Deployment**: Vercel Serverless Functions
+- **No Dependencies**: Pure Node.js `fetch` — no yt-dlp, no ffmpeg, no binaries
+
+## Project Structure
+
+```
+nogtik/
+├── src/
+│   ├── app/
+│   │   ├── api/
+│   │   │   ├── download/route.ts  # Video info extraction API
+│   │   │   └── proxy/route.ts     # Video streaming proxy
+│   │   ├── globals.css            # Styles
+│   │   ├── layout.tsx             # Root layout
+│   │   └── page.tsx               # Main UI
+│   └── lib/
+│       ├── detect.ts              # Platform detection
+│       └── platforms/
+│           ├── index.ts           # Platform exports
+│           ├── tiktok.ts          # TikTok extractor
+│           ├── instagram.ts       # Instagram extractor
+│           └── snapchat.ts        # Snapchat extractor
+├── vercel.json                    # Vercel deployment config
+└── package.json
+```
+
+## License
+
+MIT
